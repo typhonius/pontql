@@ -1,0 +1,19 @@
+services:
+  whatsappql:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3099:3099"
+    env_file:
+      - .env
+    volumes:
+      - whatsapp-session:/app/.wwebjs_auth
+      - whatsapp-data:/app/data
+    # Required for Chrome in Docker
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '1gb'
+
+volumes:
+  whatsapp-session:
+  whatsapp-data:

@@ -1,0 +1,19 @@
+{
+  "name": "pontql",
+  "version": "0.1.0",
+  "description": "WhatsApp ↔ PromptQL bridge",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "reset": "rm -rf .wwebjs_auth .wwebjs_cache && echo 'Session cleared — run npm start to re-scan QR'",
+    "restart": "rm -rf .wwebjs_cache && echo 'Cache cleared — session kept'"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  }
+}
