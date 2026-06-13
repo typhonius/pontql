@@ -101,7 +101,7 @@ export function parseEvent(event) {
 
   // started
   if (agent.started !== undefined) {
-    results.push({ type: 'status', status: 'working' });
+    results.push({ type: 'status', status: 'planning' });
   }
 
   // turn_started / llm_response — these fire constantly and drown out
@@ -115,7 +115,7 @@ export function parseEvent(event) {
 
   // actions_parsing_failed — not fatal, agent retries
   if (agent.actions_parsing_failed) {
-    results.push({ type: 'status', status: 'retrying' });
+    results.push({ type: 'status', status: 'correcting, retrying' });
   }
 
   // actions_parsed — user-facing text and action signals
@@ -218,9 +218,9 @@ export function parseEvent(event) {
     }
   }
 
-  // completed — NOT a termination signal, just status
+  // completed — NOT a termination signal, learnings may follow
   if (agent.completed !== undefined) {
-    results.push({ type: 'status', status: 'finishing up' });
+    results.push({ type: 'status', status: 'checking for learnings' });
   }
 
   return results;

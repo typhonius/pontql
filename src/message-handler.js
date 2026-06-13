@@ -406,12 +406,11 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
           if (lastAgentMessageId) {
             sessions.setAgentMessageId(chatId, lastAgentMessageId);
           }
-          // Clean up status message if no real content was sent
+          // Update status message with final state
           if (sentTexts.size === 0 && !isDone) {
             await editStatus('timed out waiting for response');
           } else if (isDone) {
-            // Delete or minimize the status message
-            try { await statusMsg?.delete(true); } catch {}
+            await editStatus('done ✓');
           }
           resolve();
           return;
