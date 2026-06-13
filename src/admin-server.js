@@ -3,11 +3,16 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { listProjects, listRooms, ensureTokens } from './promptql-client.js';
+import { sessions } from './session-store.js';
 import { config } from './config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
 const PORT = 3099;
+
+// Callback to fetch WhatsApp groups from the client (registered by index.js)
+let groupsFetcher = null;
+export function registerGroupsFetcher(fn) { groupsFetcher = fn; }
 
 let state = {
   qrDataUrl: null,
@@ -163,6 +168,48 @@ async function handleRequest(req, res) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
     setTimeout(() => process.exit(1), 300);
+    return;
+  }
+
+  // Groups — list WhatsApp groups with subscription status
+  if (req.method === 'GET' && url.pathname === '/api/groups') {
+    if (!groupsFetcher) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ connected: false, groups: [] }));
+      return;
+    }
+    try {
+      const waGroups = await groupsFetcher();
+      const subIds = sessions.getSubscribedGroupIds();
+      const groups = waGroups.map(g => ({ ...g, subscribed: subIds.has(g.id) }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ connected: true, groups }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // Groups — toggle subscription
+  if (req.method === 'POST' && url.pathname === '/api/groups/subscribe') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { groupId, groupName, subscribe } = JSON.parse(body);
+        if (subscribe) {
+          sessions.subscribeGroup(groupId, groupName);
+        } else {
+          sessions.unsubscribeGroup(groupId);
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
     return;
   }
 
@@ -325,6 +372,12 @@ header .tag{margin-left:auto;font-size:11px;color:var(--dim);background:var(--su
   <div id="acl"></div>
 </div>
 
+<div class="card" id="groups-card" style="display:none">
+  <h2>Groups <span id="groups-count" style="font-size:10px;color:var(--dim);text-transform:none;letter-spacing:0"></span></h2>
+  <input id="groups-filter" type="text" placeholder="Filter groups..." oninput="filterGroups()" style="width:100%;padding:7px 10px;background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:8px;color:#fff;font-size:13px;outline:none;margin-bottom:8px">
+  <div id="groups-list" style="max-height:260px;overflow-y:auto"><span style="color:var(--dim);font-size:13px">Loading...</span></div>
+</div>
+
 <div class="card config-card">
   <h2>PromptQL</h2>
   <div class="row">
@@ -449,6 +502,64 @@ async function loadRooms(){
   }
 }
 
+let allGroups=[];
+async function loadGroups(){
+  try{
+    const res=await fetch('/api/groups');
+    if(!res.ok)throw new Error('failed');
+    const data=await res.json();
+    if(!data.connected){
+      $('groups-card').style.display='none';
+      return;
+    }
+    $('groups-card').style.display='block';
+    allGroups=data.groups;
+    const subCount=allGroups.filter(g=>g.subscribed).length;
+    $('groups-count').textContent=subCount>0?subCount+' active':'';
+    renderGroups();
+  }catch{
+    $('groups-card').style.display='none';
+  }
+}
+
+function renderGroups(){
+  const filter=($('groups-filter')?.value||'').toLowerCase();
+  const filtered=allGroups.filter(g=>g.name.toLowerCase().includes(filter));
+  if(allGroups.length===0){
+    $('groups-list').innerHTML='<span style="color:var(--dim);font-size:13px">No groups found</span>';
+    return;
+  }
+  if(filtered.length===0){
+    $('groups-list').innerHTML='<span style="color:var(--dim);font-size:13px">No matches</span>';
+    return;
+  }
+  // Show subscribed first, then by most recent activity
+  filtered.sort((a,b)=>(b.subscribed-a.subscribed)||(b.timestamp||0)-(a.timestamp||0));
+  $('groups-list').innerHTML=filtered.map(g=>
+    '<label style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:13px;cursor:pointer" data-gid="'+g.id+'" data-gname="'+g.name.replace(/"/g,'&quot;')+'">'+
+      '<input type="checkbox" '+(g.subscribed?'checked':'')+' onchange="toggleGroup(this)" style="accent-color:var(--brand);width:16px;height:16px;flex-shrink:0">'+
+      '<span style="color:'+(g.subscribed?'#fff':'var(--dim)')+'">'+g.name+'</span>'+
+    '</label>'
+  ).join('');
+}
+
+function filterGroups(){renderGroups();}
+
+async function toggleGroup(el){
+  const label=el.closest('[data-gid]');
+  const groupId=label.dataset.gid;
+  const groupName=label.dataset.gname;
+  const subscribe=el.checked;
+  label.querySelector('span').style.color=subscribe?'#fff':'var(--dim)';
+  const g=allGroups.find(x=>x.id===groupId);
+  if(g)g.subscribed=subscribe;
+  const subCount=allGroups.filter(x=>x.subscribed).length;
+  $('groups-count').textContent=subCount>0?subCount+' active':'';
+  try{
+    await fetch('/api/groups/subscribe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({groupId,groupName,subscribe})});
+  }catch{el.checked=!el.checked;if(g)g.subscribed=!subscribe;}
+}
+
 async function poll(){
   try{
     const res=await fetch('/api/state');
@@ -538,12 +649,14 @@ async function poll(){
       $('timeout').addEventListener('input',markDirty);
       loadProjects();
       loadRooms();
+      loadGroups();
     }
 
     // Reload dropdowns when we become ready
     if(data.status==='ready'&&projectsCache.length===0){
       loadProjects();
       loadRooms();
+      loadGroups();
     }
   }catch{}
 }

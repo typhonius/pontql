@@ -33,6 +33,14 @@ db.exec(`
   )
 `);
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS subscribed_groups (
+    group_id TEXT PRIMARY KEY,
+    group_name TEXT,
+    subscribed_at TEXT DEFAULT (datetime('now'))
+  )
+`);
+
 const upsertSession = db.prepare(`
   INSERT INTO sessions (chat_id, thread_id, thread_title, room_name, last_activity, last_event_id)
   VALUES (?, ?, ?, ?, datetime('now'), '0')
@@ -56,6 +64,14 @@ const insertHistory = db.prepare(
 const getHistory = db.prepare(
   'SELECT * FROM thread_history WHERE chat_id = ? ORDER BY id DESC LIMIT ?'
 );
+
+const insertGroup = db.prepare(
+  `INSERT INTO subscribed_groups (group_id, group_name) VALUES (?, ?)
+   ON CONFLICT(group_id) DO UPDATE SET group_name = excluded.group_name`
+);
+const deleteGroup = db.prepare('DELETE FROM subscribed_groups WHERE group_id = ?');
+const getAllGroups = db.prepare('SELECT * FROM subscribed_groups ORDER BY group_name');
+const checkGroup = db.prepare('SELECT 1 FROM subscribed_groups WHERE group_id = ?');
 
 export const sessions = {
   /**
@@ -137,5 +153,40 @@ export const sessions = {
    */
   history(chatId, limit = 10) {
     return getHistory.all(chatId, limit);
+  },
+
+  /**
+   * Subscribe to a WhatsApp group by chat ID.
+   */
+  subscribeGroup(groupId, groupName) {
+    insertGroup.run(groupId, groupName);
+  },
+
+  /**
+   * Unsubscribe from a WhatsApp group.
+   */
+  unsubscribeGroup(groupId) {
+    deleteGroup.run(groupId);
+  },
+
+  /**
+   * Get all subscribed groups.
+   */
+  getSubscribedGroups() {
+    return getAllGroups.all();
+  },
+
+  /**
+   * Check if a group is subscribed (fast lookup).
+   */
+  isGroupSubscribed(groupId) {
+    return !!checkGroup.get(groupId);
+  },
+
+  /**
+   * Get subscribed group IDs as a Set (for shouldProcess).
+   */
+  getSubscribedGroupIds() {
+    return new Set(getAllGroups.all().map(g => g.group_id));
   },
 };

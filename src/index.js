@@ -6,9 +6,10 @@ const { Client, LocalAuth, MessageMedia } = pkg;
 import qrTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import { config, shouldProcess } from './config.js';
-import { ensureTokens } from './promptql-client.js';
-import { handleMessage } from './message-handler.js';
-import { startAdminServer, updateState, logActivity } from './admin-server.js';
+import { ensureTokens, submitTeaching } from './promptql-client.js';
+import { handleMessage, pendingLearnings } from './message-handler.js';
+import { sessions } from './session-store.js';
+import { startAdminServer, updateState, logActivity, registerGroupsFetcher } from './admin-server.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
@@ -157,6 +158,15 @@ client.on('ready', async () => {
   // Start heartbeat
   startHeartbeat();
 
+  // Register groups fetcher for admin dashboard
+  registerGroupsFetcher(async () => {
+    const chats = await client.getChats();
+    return chats
+      .filter(c => c.isGroup)
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .map(c => ({ id: c.id._serialized, name: c.name, timestamp: c.timestamp || 0 }));
+  });
+
   // Register page-level error handlers for early zombie detection
   try {
     if (client.pupPage) {
@@ -239,11 +249,12 @@ async function processMessage(msg, source) {
       return;
     }
 
-    // Access control check
-    const check = shouldProcess(msg);
+    // Access control check (pass dynamic group subscriptions)
+    const subscribedGroupIds = sessions.getSubscribedGroupIds();
+    const check = shouldProcess(msg, subscribedGroupIds);
     if (!check.allowed) return;
 
-    // Group name check if needed
+    // Group name check if needed (static LISTEN_GROUPS config)
     if (check.needsGroupCheck) {
       try {
         const chat = await msg.getChat();
@@ -282,6 +293,38 @@ client.on('message', (msg) => processMessage(msg, 'in'));
 client.on('message_create', (msg) => {
   if (!msg.fromMe) return;
   processMessage(msg, 'self');
+});
+
+// Handle poll votes for wiki learning approvals
+client.on('vote_update', async (vote) => {
+  try {
+    const pollId = vote.parentMessage?.id?._serialized;
+    if (!pollId) return;
+
+    const pending = pendingLearnings.get(pollId);
+    if (!pending) return;
+
+    pendingLearnings.delete(pollId);
+
+    const selected = vote.selectedOptions?.map(o => o.name) || [];
+    const { reply } = makeHelpers(pending.chatId);
+
+    if (selected.includes('Yes, add it')) {
+      try {
+        await submitTeaching(pending.threadId, pending.agentMessageId, pending.text);
+        await reply('Learning added to wiki.');
+        logActivity('learning', 'Accepted and submitted');
+      } catch (err) {
+        console.error('[vote] Failed to submit teaching:', err.message);
+        await reply('Failed to submit learning: ' + err.message);
+      }
+    } else if (selected.includes('No, skip it')) {
+      await reply('Learning skipped.');
+      logActivity('learning', 'Skipped by user');
+    }
+  } catch (err) {
+    console.error('[vote] Error handling poll vote:', err.message);
+  }
 });
 
 client.on('disconnected', (reason) => {

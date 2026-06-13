@@ -15,9 +15,14 @@ import { sessions } from './session-store.js';
 import { parseEvent } from './event-parser.js';
 import { artifactToWhatsApp, setCurrentThread } from './artifact-handler.js';
 import { trackStat, logActivity } from './admin-server.js';
+import pkg from 'whatsapp-web.js';
+const { Poll } = pkg;
 
 // Track active SSE streams so we don't double-subscribe
 const activeStreams = new Map(); // threadId → abort function
+
+// Pending learning approvals: pollMsgSerializedId → { chatId, text, threadId, agentMessageId }
+export const pendingLearnings = new Map();
 
 /**
  * Handle an incoming message from WhatsApp.
@@ -48,7 +53,7 @@ export async function handleMessage(chatId, body, reply, sendMedia, replySave) {
       const statusMsg = await replySave('_thinking..._');
       const result = await sendMessage(threadId, text);
       logActivity('api', `send_thread_message → ${threadId.slice(0, 8)}`);
-      await waitForResponse(chatId, threadId, reply, sendMedia, statusMsg);
+      await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
     } else {
       trackStat('messagesSent');
       trackStat('threadsCreated');
@@ -58,7 +63,7 @@ export async function handleMessage(chatId, body, reply, sendMedia, replySave) {
       threadId = result.thread_id;
       logActivity('api', `start_thread → ${threadId.slice(0, 8)} "${result.title || ''}"`);
       sessions.setThread(chatId, threadId, result.title);
-      await waitForResponse(chatId, threadId, reply, sendMedia, statusMsg);
+      await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
     }
   } catch (err) {
     console.error('[handler] Error:', err.message);
@@ -261,7 +266,7 @@ async function handleCommand(chatId, text, reply, sendMedia) {
  *
  * @param {object} statusMsg - The initial "_thinking..._" or "_starting new thread..._" message object
  */
-async function waitForResponse(chatId, threadId, reply, sendMedia, statusMsg) {
+async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg) {
   // Track thread for artifact handler
   setCurrentThread(threadId);
 
@@ -349,6 +354,29 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, statusMsg) {
                 } catch (err) {
                   console.error('[artifact] Error:', err.message);
                   await reply(`_[Artifact: ${item.artifact.title || 'unknown'}] (failed to render)_`);
+                }
+                break;
+
+              case 'learning':
+                // Send formatted learning text + approval poll
+                if (!sentTexts.has('learning:' + item.text)) {
+                  sentTexts.add('learning:' + item.text);
+                  await editStatus('...');
+                  await reply(`*Suggested learning:*\n\n${item.text}`);
+                  const poll = new Poll(
+                    'Add this to the wiki?',
+                    ['Yes, add it', 'No, skip it'],
+                  );
+                  const pollMsg = await replySave(poll);
+                  if (pollMsg?.id?._serialized) {
+                    pendingLearnings.set(pollMsg.id._serialized, {
+                      chatId,
+                      text: item.text,
+                      threadId,
+                      agentMessageId: lastAgentMessageId,
+                    });
+                    logActivity('learning', `Poll sent for: ${item.text.slice(0, 60)}`);
+                  }
                 }
                 break;
 

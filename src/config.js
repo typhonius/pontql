@@ -61,7 +61,7 @@ export const config = {
  *
  * Returns { allowed, strippedBody?, needsGroupCheck? }
  */
-export function shouldProcess(msg) {
+export function shouldProcess(msg, subscribedGroupIds = null) {
   const { listenDm, listenGroups, who, myNumber, allowedContacts, wakeWord } = config;
   const isGroup = msg.from.endsWith('@g.us');
   const senderNumber = msg.author || msg.from.replace('@c.us', '');
@@ -71,9 +71,11 @@ export function shouldProcess(msg) {
 
   // ── 1. WHERE ──
   if (isGroup) {
-    if (listenGroups.length === 0) return { allowed: false };
-    // If not wildcard, we need to check group name later
-    const needsGroupCheck = !listenGroups.includes('*');
+    const isDynamicSub = subscribedGroupIds?.has(msg.from);
+    if (listenGroups.length === 0 && !isDynamicSub) return { allowed: false };
+    // If dynamically subscribed, skip the group name check
+    // If not wildcard and not dynamic, we need to check group name later
+    const needsGroupCheck = !isDynamicSub && !listenGroups.includes('*');
     if (needsGroupCheck) {
       // Pass through — will be verified against group name in index.js
     }

@@ -87,7 +87,12 @@ export function parseEvent(event) {
 
   // Wiki learning suggestion
   if (update.wiki_learning_suggestion) {
-    results.push({ type: 'status', status: 'learning' });
+    const wls = update.wiki_learning_suggestion;
+    if (wls.completed?.learning_suggestion?.learnings_markdown) {
+      results.push({ type: 'learning', text: wls.completed.learning_suggestion.learnings_markdown });
+    } else {
+      results.push({ type: 'status', status: 'learning' });
+    }
   }
 
   // Main agent loop
@@ -139,8 +144,20 @@ export function parseEvent(event) {
       if (action.edit_file) {
         results.push({ type: 'status', status: `editing: ${action.edit_file.path}` });
       }
-      if (action.propose_learnings || action.learning_block) {
-        results.push({ type: 'status', status: 'learning' });
+      if (action.propose_learnings) {
+        const text = action.propose_learnings.learnings;
+        if (text) {
+          results.push({ type: 'learning', text });
+        } else {
+          results.push({ type: 'status', status: 'learning' });
+        }
+      } else if (action.learning_block) {
+        const text = action.learning_block.learnings;
+        if (text) {
+          results.push({ type: 'learning', text });
+        } else {
+          results.push({ type: 'status', status: 'learning' });
+        }
       }
     }
   }
