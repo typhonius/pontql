@@ -10,6 +10,8 @@ import {
   listProjects,
   submitTeaching,
   getCache,
+  createEmptyThread,
+  uploadArtifact,
 } from './promptql-client.js';
 import { sessions } from './session-store.js';
 import { parseEvent } from './event-parser.js';
@@ -31,8 +33,9 @@ export const pendingLearnings = new Map();
  * @param {function} reply - Async function to send text back (fire and forget)
  * @param {function} sendMedia - Async function to send media (buffer, options)
  * @param {function} replySave - Async function to send text and return the message object (for editing)
+ * @param {object} [media] - Optional media attachment { data: Buffer, mimetype: string, filename: string }
  */
-export async function handleMessage(chatId, body, reply, sendMedia, replySave) {
+export async function handleMessage(chatId, body, reply, sendMedia, replySave, media) {
   if (!body || !body.trim()) return;
   const text = body.trim();
 
@@ -49,21 +52,59 @@ export async function handleMessage(chatId, body, reply, sendMedia, replySave) {
     if (threadId) {
       sessions.touch(chatId);
       trackStat('messagesSent');
-      logActivity('msg', `→ ${text.slice(0, 80)}`);
+      logActivity('msg', `→ ${text.slice(0, 80)}${media ? ' [+media]' : ''}`);
       const statusMsg = await replySave('_thinking..._');
-      const result = await sendMessage(threadId, text);
+
+      // Upload media as artifact if present
+      let uploads;
+      if (media) {
+        try {
+          const artifact = await uploadArtifact(threadId, media.data, media.filename, media.mimetype);
+          uploads = [{ artifact_name: media.filename, artifact_reference: { artifact_id: artifact.artifact_id, version: artifact.version } }];
+          logActivity('upload', `Uploaded ${media.filename} → ${artifact.artifact_id}`);
+        } catch (err) {
+          console.error('[upload] Failed to upload media:', err.message);
+          await reply(`_Failed to upload image: ${err.message}_`);
+        }
+      }
+
+      const result = await sendMessage(threadId, text, uploads);
       logActivity('api', `send_thread_message → ${threadId.slice(0, 8)}`);
       await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
     } else {
       trackStat('messagesSent');
       trackStat('threadsCreated');
-      logActivity('msg', `→ [new] ${text.slice(0, 80)}`);
+      logActivity('msg', `→ [new] ${text.slice(0, 80)}${media ? ' [+media]' : ''}`);
       const statusMsg = await replySave('_thinking..._');
-      const result = await startThread(text);
-      threadId = result.thread_id;
-      logActivity('api', `start_thread → ${threadId.slice(0, 8)} "${result.title || ''}"`);
-      sessions.setThread(chatId, threadId, result.title);
-      await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
+
+      if (media) {
+        // New thread with media: create empty thread → upload artifact → send message
+        const emptyThread = await createEmptyThread();
+        threadId = emptyThread.thread_id;
+        logActivity('api', `create_empty_thread → ${threadId.slice(0, 8)}`);
+
+        let uploads;
+        try {
+          const artifact = await uploadArtifact(threadId, media.data, media.filename, media.mimetype);
+          uploads = [{ artifact_name: media.filename, artifact_reference: { artifact_id: artifact.artifact_id, version: artifact.version } }];
+          logActivity('upload', `Uploaded ${media.filename} → ${artifact.artifact_id}`);
+        } catch (err) {
+          console.error('[upload] Failed to upload media:', err.message);
+          await reply(`_Failed to upload image: ${err.message}_`);
+        }
+
+        const result = await sendMessage(threadId, text, uploads);
+        logActivity('api', `send_thread_message → ${threadId.slice(0, 8)}`);
+        sessions.setThread(chatId, threadId, emptyThread.title);
+        await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
+      } else {
+        // New thread without media: use start_thread directly
+        const result = await startThread(text);
+        threadId = result.thread_id;
+        logActivity('api', `start_thread → ${threadId.slice(0, 8)} "${result.title || ''}"`);
+        sessions.setThread(chatId, threadId, result.title);
+        await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
+      }
     }
   } catch (err) {
     console.error('[handler] Error:', err.message);

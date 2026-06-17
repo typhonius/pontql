@@ -240,8 +240,12 @@ function makeHelpers(chatId) {
 
 async function processMessage(msg, source) {
   try {
-    // Skip status updates and empty messages
-    if (msg.isStatus || !msg.body) return;
+    // Skip status updates
+    if (msg.isStatus) return;
+
+    // Allow messages with media even if body is empty (use caption or default description)
+    const hasMedia = msg.hasMedia;
+    if (!msg.body && !hasMedia) return;
 
     // Skip messages we sent as bot replies
     if (msg.id?._serialized && sentByBot.has(msg.id._serialized)) {
@@ -269,17 +273,39 @@ async function processMessage(msg, source) {
       }
     }
 
-    const body = check.strippedBody;
+    // For media-only messages (no text), use a default body
+    const body = check.strippedBody || (hasMedia ? '[Sent an image]' : '');
     if (!body) return;
 
     // For self-sent messages, reply to the chat we sent to (not our own number)
     const chatId = source === 'self' ? msg.to : msg.from;
 
-    console.log(`[${source}] ${chatId}: ${body.slice(0, 80)}${body.length > 80 ? '...' : ''}`);
+    // Download media if present
+    let media = null;
+    if (hasMedia) {
+      try {
+        const attachment = await msg.downloadMedia();
+        if (attachment) {
+          const ext = (attachment.mimetype || '').split('/')[1]?.split(';')[0] || 'bin';
+          media = {
+            data: Buffer.from(attachment.data, 'base64'),
+            mimetype: attachment.mimetype || 'application/octet-stream',
+            filename: attachment.filename || `upload_${Date.now()}.${ext}`,
+          };
+          console.log(`[${source}] ${chatId}: media ${media.mimetype} (${media.data.length} bytes)`);
+          logActivity('media', `${media.mimetype} ${media.filename} (${media.data.length} bytes)`);
+        }
+      } catch (err) {
+        console.error(`[${source}] Failed to download media:`, err.message);
+        logActivity('error', `media download: ${err.message}`);
+      }
+    }
+
+    console.log(`[${source}] ${chatId}: ${body.slice(0, 80)}${body.length > 80 ? '...' : ''}${media ? ' [+media]' : ''}`);
     logActivity('msg', `[${source}] ${body.slice(0, 60)}`);
 
     const { reply, sendMedia, replySave } = makeHelpers(chatId);
-    await handleMessage(chatId, body, reply, sendMedia, replySave);
+    await handleMessage(chatId, body, reply, sendMedia, replySave, media);
   } catch (err) {
     console.error(`[${source}] Unhandled error:`, err.message);
     logActivity('error', err.message);

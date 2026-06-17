@@ -66,8 +66,8 @@ export function shouldProcess(msg, subscribedGroupIds = null) {
   const isGroup = msg.from.endsWith('@g.us');
   const senderNumber = msg.author || msg.from.replace('@c.us', '');
   const isSelf = (myNumber && senderNumber.includes(myNumber)) || msg.fromMe;
-  let body = msg.body?.trim();
-  if (!body) return { allowed: false };
+  let body = msg.body?.trim() || '';
+  if (!body && !msg.hasMedia) return { allowed: false };
 
   // ── 1. WHERE ──
   if (isGroup) {
@@ -94,11 +94,14 @@ export function shouldProcess(msg, subscribedGroupIds = null) {
   // who === 'anyone' → no identity check
 
   // ── 3. WAKE WORD ──
-  if (wakeWord) {
+  if (wakeWord && body) {
     const lower = body.toLowerCase();
     if (!lower.startsWith(wakeWord)) return { allowed: false };
     body = body.slice(wakeWord.length).trim();
-    if (!body) return { allowed: false }; // wake word alone, no actual message
+    if (!body && !msg.hasMedia) return { allowed: false }; // wake word alone, no actual message
+  } else if (wakeWord && !body) {
+    // Media-only message with wake word required — skip (no way to trigger)
+    return { allowed: false };
   }
 
   return {

@@ -252,8 +252,11 @@ export async function startThread(message) {
 
 /**
  * Send a follow-up message to an existing thread.
+ * @param {string} threadId
+ * @param {string} message
+ * @param {Array<{artifact_name: string, artifact_reference: {artifact_id: string, version: number}}>} [uploads]
  */
-export async function sendMessage(threadId, message) {
+export async function sendMessage(threadId, message, uploads) {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
@@ -263,11 +266,13 @@ export async function sendMessage(threadId, message) {
         $message: String!
         $timezone: String!
         $threadId: String!
+        $uploads: [UserUploadInput!]
       ) {
         send_thread_message(
           threadId: $threadId
           timezone: $timezone
           message: $message
+          uploads: $uploads
         ) {
           thread_event_id
           event_data
@@ -279,11 +284,106 @@ export async function sendMessage(threadId, message) {
       message,
       threadId,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      ...(uploads ? { uploads } : {}),
     },
     headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
   });
 
   return data.send_thread_message;
+}
+
+/**
+ * Create an empty thread (used when we need to upload artifacts before sending the first message).
+ */
+export async function createEmptyThread() {
+  const c = await ensureTokens();
+  const hasRoom = !!c.roomId;
+
+  const query = `
+    mutation CreateEmptyThread(
+      $projectId: String!
+      ${hasRoom ? '$roomId: String' : ''}
+    ) {
+      create_empty_thread(
+        projectId: $projectId
+        ${hasRoom ? 'roomId: $roomId' : ''}
+      ) {
+        thread_id
+        title
+        created_at
+      }
+    }
+  `;
+
+  const variables = { projectId: c.projectId };
+  if (hasRoom) variables.roomId = c.roomId;
+
+  const data = await graphqlRequest({
+    url: c.playgroundV2Endpoint,
+    query,
+    variables,
+    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+  });
+
+  return data.create_empty_thread;
+}
+
+/**
+ * Upload a file as an artifact scoped to a thread.
+ * Uses the multipart REST API (same as the console's ArtifactsV2Client).
+ *
+ * @param {string} threadId
+ * @param {Buffer} buffer - The file data
+ * @param {string} filename
+ * @param {string} mimetype
+ * @returns {{ artifact_id: string, version: number }}
+ */
+export async function uploadArtifact(threadId, buffer, filename, mimetype) {
+  const c = await ensureTokens();
+  const project = (c.allProjects || []).find(p => p.id === c.projectId);
+  const apiEndpoint = project?.endpoint;
+  if (!apiEndpoint) throw new Error('No API endpoint configured for artifact upload');
+  const baseUrl = `${apiEndpoint.replace(/\/$/, '')}/promptql-v2`;
+
+  const request = {
+    scope: {
+      type: 'thread',
+      thread_id: threadId,
+      identifier: filename,
+    },
+    operation: {
+      type: 'upload',
+      title: filename,
+      description: filename,
+      artifact_type: 'file',
+    },
+  };
+
+  const formData = new FormData();
+  formData.append(
+    'artifact_request',
+    new Blob([JSON.stringify(request)], { type: 'application/json' })
+  );
+  formData.append(
+    'artifact_data',
+    new Blob([buffer], { type: mimetype || 'application/octet-stream' }),
+    filename
+  );
+
+  const res = await fetch(`${baseUrl}/artifacts`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${c.userDirectoryToken}`,
+    },
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Artifact upload failed: ${res.status} ${text}`);
+  }
+
+  return res.json(); // { artifact_id, version }
 }
 
 /**
