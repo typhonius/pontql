@@ -53,13 +53,13 @@ All setup happens through the web dashboard — no need to edit config files. Ju
 - Chrome or Chromium (auto-detected, or set `CHROME_PATH`)
 
 **Both need:**
-- A PromptQL user token (`pql_ut_...`)
+- A PromptQL user token (`pql_ut_...`) — see [Configuration](#configuration)
 
 ## Configuration
 
 Everything is configured through the dashboard at `http://localhost:3099`. On first run, you'll be prompted for:
 
-- **PromptQL token** (`pql_ut_...`) — get one from Settings > Access Tokens in the PromptQL console
+- **PromptQL token** (`pql_ut_...`) — in the [PromptQL console](https://prompt.ql.app), go to Users > your profile > Personal Access Tokens
 - **Phone number** — your number with country code, no `+`
 
 The project is auto-detected from your token. All other settings (rooms, access control, wake word) can be changed from the dashboard after setup.

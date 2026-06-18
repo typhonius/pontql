@@ -562,7 +562,7 @@ async function poll(){
         '<input id="setup-number" type="text" placeholder="61412345678" style="width:100%;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;margin-bottom:16px">'+
         '<button onclick="doSetup()" style="width:100%;padding:10px;background:var(--brand);color:var(--brand-fg);border:none;border-radius:6px;font-weight:600;cursor:pointer;font-size:14px">Connect</button>'+
         '<p id="setup-err" style="color:#ef4444;font-size:12px;margin-top:8px"></p>'+
-        '<p style="color:var(--dim2);font-size:11px;margin-top:12px">Get a token from Settings \\u2192 Access Tokens in the PromptQL console</p>'+
+        '<p style="color:var(--dim2);font-size:11px;margin-top:12px">Create a token in the <a href="https://prompt.ql.app" target="_blank" style="color:var(--brand)">PromptQL console</a> under Users \\u2192 your profile \\u2192 Personal Access Tokens</p>'+
         '</div>';
       // Hide everything except the setup form
       $('status-card').style.display='none';
