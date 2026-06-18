@@ -11,25 +11,20 @@ PontQL bridges WhatsApp messages to the PromptQL API. It renders artifacts (tabl
 ### Option 1: Docker (easiest)
 
 ```bash
-cp .env.example .env
-# Edit .env — add your PROMPTQL_TOKEN, PROMPTQL_ENDPOINT, and MY_NUMBER
-
 docker compose up -d
 
-# Open http://localhost:3099 and scan the QR code with WhatsApp
+# Open http://localhost:3099
+# Enter your PromptQL token and phone number
+# Scan the QR code with WhatsApp — done
 ```
 
 ### Option 2: Run directly
 
 ```bash
 npm install
-
-cp .env.example .env
-# Edit .env — add your PROMPTQL_TOKEN, PROMPTQL_ENDPOINT, and MY_NUMBER
-
 npm start
 
-# Open http://localhost:3099 and scan the QR code
+# Open http://localhost:3099 and follow the setup wizard
 ```
 
 ### Option 3: Server (24/7)
@@ -39,9 +34,6 @@ npm start
 npm install
 npm install -g pm2
 
-cp .env.example .env
-# Edit .env
-
 pm2 start npm --name pontql -- start
 pm2 save
 
@@ -50,7 +42,7 @@ ssh -L 3099:localhost:3099 user@your-server
 # Then open http://localhost:3099
 ```
 
-After starting, scan the QR code with WhatsApp (Settings > Linked Devices > Link a Device). Then send a message — that's it.
+All setup happens through the web dashboard — no need to edit config files. Just open http://localhost:3099, enter your token and phone number, scan the QR code, and send a message.
 
 ## Requirements
 
@@ -65,15 +57,19 @@ After starting, scan the QR code with WhatsApp (Settings > Linked Devices > Link
 
 ## Configuration
 
-Three values are required in `.env`:
+Everything is configured through the dashboard at `http://localhost:3099`. On first run, you'll be prompted for:
+
+- **PromptQL token** (`pql_ut_...`) — get one from Settings > Access Tokens in the PromptQL console
+- **Phone number** — your number with country code, no `+`
+
+The project is auto-detected from your token. All other settings (rooms, access control, wake word) can be changed from the dashboard after setup.
+
+You can also pre-configure via `.env` if you prefer:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `PROMPTQL_TOKEN` | Yes | Your PromptQL user token (`pql_ut_...`) |
-| `PROMPTQL_ENDPOINT` | Yes | Your project endpoint (e.g. `https://data.prompt.ql.app/my-project`) |
 | `MY_NUMBER` | Yes | Your phone number (country code, no +) |
-
-Everything else has sensible defaults and can be changed from the admin dashboard at `http://localhost:3099`.
 
 ### Access Control
 
@@ -102,7 +98,6 @@ Three independent axes — combine freely:
 | `/resume <n>` | Resume thread #n |
 | `/rooms` | List available PromptQL rooms |
 | `/room <name>` | Switch to a room |
-| `/project` | Show project endpoint |
 | `/teach <text>` | Submit knowledge to the wiki |
 | `/status` | Show current bridge state |
 | `/help` | Show all commands |

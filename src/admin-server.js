@@ -256,10 +256,10 @@ async function handleRequest(req, res) {
 
 export function startAdminServer() {
   const server = createServer(handleRequest);
-  // Always bind to 127.0.0.1 only - never expose to network.
-  // Access remotely via SSH tunnel: ssh -L 3099:localhost:3099 yourserver
-  server.listen(PORT, '127.0.0.1', () => {
-    console.log(`[admin] Dashboard: http://localhost:${PORT} (localhost only)`);
+  // In Docker, bind to 0.0.0.0 so port mapping works. Otherwise localhost only.
+  const host = process.env.DOCKER === '1' ? '0.0.0.0' : '127.0.0.1';
+  server.listen(PORT, host, () => {
+    console.log(`[admin] Dashboard: http://localhost:${PORT}${host === '127.0.0.1' ? ' (localhost only)' : ''}`);
   });
   return server;
 }
