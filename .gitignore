@@ -1,5 +1,7 @@
 node_modules/
 .env
+.env.bak
 data/*.db*
+data/config.json
 .wwebjs_auth/
 .wwebjs_cache/

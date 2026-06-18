@@ -4,8 +4,19 @@ import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, '..', '.env');
+const persistedConfigPath = join(__dirname, '..', 'data', 'config.json');
 
-// Load .env
+// Load persisted config first (survives Docker container recreation)
+if (existsSync(persistedConfigPath)) {
+  try {
+    const persisted = JSON.parse(readFileSync(persistedConfigPath, 'utf-8'));
+    for (const [key, val] of Object.entries(persisted)) {
+      if (val && !process.env[key]) process.env[key] = val;
+    }
+  } catch {}
+}
+
+// Load .env (overrides persisted config since env file is checked second with !process.env[key])
 if (existsSync(envPath)) {
   readFileSync(envPath, 'utf-8').split('\n').forEach(line => {
     const trimmed = line.trim();
@@ -26,12 +37,9 @@ function csvList(val) {
 
 export const config = {
   // PromptQL
-  pat: process.env.PROMPTQL_PAT || process.env.PERSONAL_PAT,
-  projectName: process.env.PROMPTQL_PROJECT || null,
+  token: process.env.PROMPTQL_TOKEN,
+  projectEndpoint: process.env.PROMPTQL_ENDPOINT || null,
   roomName: process.env.PROMPTQL_ROOM || 'whatsapp',
-  controlPlaneAuth: process.env.CONTROL_PLANE_AUTH || 'https://auth.pro.hasura.io',
-  controlPlaneData: process.env.CONTROL_PLANE_DATA || 'https://data.pro.hasura.io/v1/graphql',
-  playgroundHost: process.env.PROMPTQL_PLAYGROUND_HOST || 'https://playground.promptql.pro.hasura.io',
 
   // Access control — three independent axes
   // WHERE: where does it listen?

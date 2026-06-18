@@ -1,18 +1,25 @@
 import { config } from './config.js';
 
-// In-memory token cache
+// Shared GQL endpoint (not project-specific, used for discovery + all queries)
+const SHARED_GQL = 'https://data.prompt.ql.app/promptql/playground-v2-hge/v1/graphql';
+
+// Derive endpoint URLs from the project endpoint.
+// Project endpoint looks like: https://data.prompt.ql.app/amql
+// Playground v2 host:          https://data.prompt.ql.app/amql/promptql-v2
+function deriveEndpoints(projectEndpoint) {
+  const ep = projectEndpoint.replace(/\/$/, '');
+  return { gqlEndpoint: SHARED_GQL, playground2Host: `${ep}/promptql-v2`, apiEndpoint: ep };
+}
+
 const cache = {
-  promptqlToken: null,
-  promptqlTokenExpiry: null,
-  userDirectoryToken: null,
-  userDirectoryTokenExpiry: null,
-  projectId: null,
-  projectName: null,
-  playgroundV2Endpoint: null,
+  gqlEndpoint: null,
   playground2Host: null,
-  allProjects: null,
+  apiEndpoint: null,
   roomId: null,
+  initialized: false,
 };
+
+const authHeaders = () => ({ Authorization: `pat ${config.token}` });
 
 async function graphqlRequest({ url, query, variables = {}, headers = {} }) {
   const res = await fetch(url, {
@@ -27,81 +34,14 @@ async function graphqlRequest({ url, query, variables = {}, headers = {} }) {
   return json.data;
 }
 
-async function getProjects() {
-  const data = await graphqlRequest({
-    url: config.controlPlaneData,
-    query: `
-      query getProjects {
-        ddn_projects(order_by: { created_at: desc }) {
-          id
-          name
-          title
-          endpoint
-          plan_name
-          private_ddn {
-            fqdn
-            promptql_config
-            promptql_route_config
-          }
-        }
-      }
-    `,
-    headers: { Authorization: `pat ${config.pat}` },
-  });
-  return data.ddn_projects || [];
-}
-
-async function getPromptQLAccessToken(projectId) {
-  const res = await fetch(`${config.controlPlaneAuth}/ddn/promptql/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `pat ${config.pat}`,
-      'x-hasura-project-id': projectId,
-    },
-  });
-  if (!res.ok) throw new Error(`Failed to get PromptQL token: ${res.status}`);
-  return res.json();
-}
-
-async function enrichToken({ playgroundV2Endpoint, luxJWT, projectId }) {
-  const data = await graphqlRequest({
-    url: playgroundV2Endpoint,
-    query: `
-      mutation EnrichToken($luxJWT: String!, $projectId: uuid!) {
-        enrich_token(luxJWT: $luxJWT, projectId: $projectId) {
-          userDirectoryJWT
-        }
-      }
-    `,
-    variables: { luxJWT, projectId },
-  });
-  return data.enrich_token.userDirectoryJWT;
-}
-
-function buildPlaygroundV2Endpoint(project) {
-  const routeConfig = project?.private_ddn?.promptql_route_config;
-  const playgroundUri = routeConfig?.playground_uri;
-  const base = (playgroundUri || config.playgroundHost).replace(/\/$/, '');
-  return `${base}-v2-hge/v1/graphql`;
-}
-
-function buildPlayground2Host(project) {
-  const routeConfig = project?.private_ddn?.promptql_route_config;
-  const playgroundUri = routeConfig?.playground_uri;
-  if (playgroundUri) return playgroundUri.replace(/\/$/, '');
-  const apiEndpoint = project?.endpoint;
-  if (apiEndpoint) return `${apiEndpoint.replace(/\/$/, '')}/promptql-v2`;
-  return null;
-}
-
 async function ensureRoom() {
   if (cache.roomId) return cache.roomId;
-  const headers = { Authorization: `Bearer ${cache.userDirectoryToken}` };
+  const headers = authHeaders();
 
   // Try to find existing room
   try {
     const data = await graphqlRequest({
-      url: cache.playgroundV2Endpoint,
+      url: cache.gqlEndpoint,
       query: `
         query FindRoom($name: String!) {
           rooms(where: { name: { _eq: $name } }, limit: 1) {
@@ -125,7 +65,7 @@ async function ensureRoom() {
   // Create room
   try {
     const data = await graphqlRequest({
-      url: cache.playgroundV2Endpoint,
+      url: cache.gqlEndpoint,
       query: `
         mutation CreateRoom($name: String!, $description: String) {
           create_room(name: $name, description: $description, visibility: "public") {
@@ -149,52 +89,46 @@ async function ensureRoom() {
 }
 
 export async function ensureTokens() {
-  const now = new Date();
-  if (
-    cache.userDirectoryToken &&
-    cache.userDirectoryTokenExpiry &&
-    new Date(cache.userDirectoryTokenExpiry) > now
-  ) {
-    return cache;
-  }
+  if (cache.initialized) return cache;
 
-  if (!cache.projectId) {
-    const projects = await getProjects();
-    if (projects.length === 0) throw new Error('No projects found for this PAT');
-
-    let project;
-    if (config.projectName) {
-      project = projects.find(p => p.name === config.projectName);
-      if (!project) throw new Error(`Project "${config.projectName}" not found`);
-    } else {
-      project = projects[0];
+  if (config.projectEndpoint) {
+    // Explicit endpoint provided
+    const { gqlEndpoint, playground2Host, apiEndpoint } = deriveEndpoints(config.projectEndpoint);
+    cache.gqlEndpoint = gqlEndpoint;
+    cache.playground2Host = playground2Host;
+    cache.apiEndpoint = apiEndpoint;
+  } else {
+    // Auto-discover project from token
+    cache.gqlEndpoint = SHARED_GQL;
+    const data = await graphqlRequest({
+      url: SHARED_GQL,
+      query: `query { project_info { project_name } }`,
+      headers: authHeaders(),
+    });
+    const projects = data.project_info;
+    if (!projects?.length) {
+      throw new Error('Token has no project access. Set PROMPTQL_ENDPOINT manually.');
     }
-
-    cache.projectId = project.id;
-    cache.projectName = project.name;
-    cache.playgroundV2Endpoint = buildPlaygroundV2Endpoint(project);
-    cache.playground2Host = buildPlayground2Host(project);
-    cache.allProjects = projects;
-    console.log(`[pql] Project: ${project.name} (${project.id})`);
-    console.log(`[pql] Endpoint: ${cache.playgroundV2Endpoint}`);
+    const projectName = projects[0].project_name;
+    const ep = `https://data.prompt.ql.app/${projectName}`;
+    cache.playground2Host = `${ep}/promptql-v2`;
+    cache.apiEndpoint = ep;
+    console.log(`[pql] Auto-discovered project: ${projectName}`);
   }
 
-  const { token: pqlToken } = await getPromptQLAccessToken(cache.projectId);
-  cache.promptqlToken = pqlToken;
-
-  const udToken = await enrichToken({
-    playgroundV2Endpoint: cache.playgroundV2Endpoint,
-    luxJWT: pqlToken,
-    projectId: cache.projectId,
-  });
-  cache.userDirectoryToken = udToken;
-
+  // Validate the token works
   try {
-    const payload = JSON.parse(Buffer.from(udToken.split('.')[1], 'base64').toString());
-    cache.userDirectoryTokenExpiry = new Date(payload.exp * 1000).toISOString();
-  } catch {
-    cache.userDirectoryTokenExpiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    await graphqlRequest({
+      url: cache.gqlEndpoint,
+      query: `query { rooms(limit: 1) { room_id } }`,
+      headers: authHeaders(),
+    });
+  } catch (err) {
+    throw new Error(`Token validation failed: ${err.message}`);
   }
+
+  console.log(`[pql] Endpoint: ${cache.gqlEndpoint}`);
+  cache.initialized = true;
 
   await ensureRoom();
   return cache;
@@ -211,13 +145,11 @@ export async function startThread(message) {
   const query = `
     mutation StartThread(
       $message: String!
-      $projectId: String!
       $timezone: String!
       ${hasRoom ? '$roomId: String' : ''}
     ) {
       start_thread(
         message: $message
-        projectId: $projectId
         timezone: $timezone
         ${hasRoom ? 'roomId: $roomId' : ''}
       ) {
@@ -235,16 +167,15 @@ export async function startThread(message) {
 
   const variables = {
     message,
-    projectId: c.projectId,
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   };
   if (hasRoom) variables.roomId = c.roomId;
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query,
     variables,
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.start_thread;
@@ -260,7 +191,7 @@ export async function sendMessage(threadId, message, uploads) {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       mutation SendThreadMessage(
         $message: String!
@@ -286,7 +217,7 @@ export async function sendMessage(threadId, message, uploads) {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       ...(uploads ? { uploads } : {}),
     },
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.send_thread_message;
@@ -301,11 +232,9 @@ export async function createEmptyThread() {
 
   const query = `
     mutation CreateEmptyThread(
-      $projectId: String!
       ${hasRoom ? '$roomId: String' : ''}
     ) {
       create_empty_thread(
-        projectId: $projectId
         ${hasRoom ? 'roomId: $roomId' : ''}
       ) {
         thread_id
@@ -315,14 +244,14 @@ export async function createEmptyThread() {
     }
   `;
 
-  const variables = { projectId: c.projectId };
+  const variables = {};
   if (hasRoom) variables.roomId = c.roomId;
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query,
     variables,
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.create_empty_thread;
@@ -340,10 +269,7 @@ export async function createEmptyThread() {
  */
 export async function uploadArtifact(threadId, buffer, filename, mimetype) {
   const c = await ensureTokens();
-  const project = (c.allProjects || []).find(p => p.id === c.projectId);
-  const apiEndpoint = project?.endpoint;
-  if (!apiEndpoint) throw new Error('No API endpoint configured for artifact upload');
-  const baseUrl = `${apiEndpoint.replace(/\/$/, '')}/promptql-v2`;
+  const baseUrl = c.playground2Host;
 
   const request = {
     scope: {
@@ -372,9 +298,7 @@ export async function uploadArtifact(threadId, buffer, filename, mimetype) {
 
   const res = await fetch(`${baseUrl}/artifacts`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${c.userDirectoryToken}`,
-    },
+    headers: authHeaders(),
     body: formData,
   });
 
@@ -407,7 +331,7 @@ export async function streamThreadEvents(threadId, { onEvent, onDone, onError })
       const res = await fetch(sseUrl, {
         headers: {
           Accept: 'text/event-stream',
-          Authorization: `Bearer ${c.userDirectoryToken}`,
+          ...authHeaders(),
         },
         signal: controller.signal,
       });
@@ -460,7 +384,7 @@ export async function pollThreadEvents(threadId, afterEventId = '0') {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       query GetThreadEvents($threadId: uuid!, $afterEventId: bigint!) {
         thread_events(
@@ -477,7 +401,7 @@ export async function pollThreadEvents(threadId, afterEventId = '0') {
       }
     `,
     variables: { threadId, afterEventId: String(afterEventId) },
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.thread_events || [];
@@ -488,13 +412,10 @@ export async function pollThreadEvents(threadId, afterEventId = '0') {
  */
 export async function fetchArtifactData(artifactId) {
   const c = await ensureTokens();
-  const project = (c.allProjects || []).find(p => p.id === c.projectId);
-  const apiEndpoint = project?.endpoint;
-  if (!apiEndpoint) throw new Error('No API endpoint configured');
 
-  const url = `${apiEndpoint.replace(/\/$/, '')}/promptql-v2/artifacts/${artifactId}/data`;
+  const url = `${c.playground2Host}/artifacts/${artifactId}/data`;
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   if (!res.ok) throw new Error(`Artifact fetch failed: ${res.status}`);
@@ -511,7 +432,7 @@ export async function submitTeaching(threadId, agentMessageId, teaching) {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       mutation SubmitTeaching(
         $teachings: String!
@@ -530,7 +451,7 @@ export async function submitTeaching(threadId, agentMessageId, teaching) {
       }
     `,
     variables: { teachings: teaching, threadId, agentMessageId },
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.submit_user_teaching;
@@ -543,7 +464,7 @@ export async function listRooms() {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       query GetRooms {
         rooms(where: { deleted_at: { _is_null: true } }, order_by: { name: asc }) {
@@ -553,7 +474,7 @@ export async function listRooms() {
         }
       }
     `,
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.rooms || [];
@@ -566,7 +487,7 @@ export async function switchRoom(roomName) {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       query FindRoom($name: String!) {
         rooms(where: { name: { _eq: $name } }, limit: 1) {
@@ -576,7 +497,7 @@ export async function switchRoom(roomName) {
       }
     `,
     variables: { name: roomName },
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   if (!data.rooms?.length) return null;
@@ -596,7 +517,7 @@ export async function listThreads(roomId = null, limit = 10) {
     : `where: { deleted_at: { _is_null: true } }`;
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       query GetThreads {
         threads_v2(${where}, order_by: { updated_at: desc }, limit: ${limit}) {
@@ -607,40 +528,10 @@ export async function listThreads(roomId = null, limit = 10) {
         }
       }
     `,
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.threads_v2 || [];
-}
-
-/**
- * Switch to a different project by name.
- */
-export async function switchProject(projectName) {
-  const projects = cache.allProjects || (await getProjects());
-  const project = projects.find(p =>
-    p.name.toLowerCase() === projectName.toLowerCase()
-  );
-  if (!project) return null;
-
-  cache.projectId = project.id;
-  cache.projectName = project.name;
-  cache.playgroundV2Endpoint = buildPlaygroundV2Endpoint(project);
-  cache.playground2Host = buildPlayground2Host(project);
-  cache.userDirectoryToken = null;
-  cache.userDirectoryTokenExpiry = null;
-  cache.roomId = null;
-
-  await ensureTokens();
-  return { id: project.id, name: project.name };
-}
-
-/**
- * List all available projects.
- */
-export async function listProjects() {
-  const projects = cache.allProjects || (await getProjects());
-  return projects.map(p => ({ id: p.id, name: p.name, title: p.title }));
 }
 
 /**
@@ -650,7 +541,7 @@ export async function listThreadArtifacts(threadId) {
   const c = await ensureTokens();
 
   const data = await graphqlRequest({
-    url: c.playgroundV2Endpoint,
+    url: c.gqlEndpoint,
     query: `
       query GetThreadArtifacts($tid: uuid!) {
         thread_artifacts(where: { thread_id: { _eq: $tid } }) {
@@ -660,7 +551,7 @@ export async function listThreadArtifacts(threadId) {
       }
     `,
     variables: { tid: threadId },
-    headers: { Authorization: `Bearer ${c.userDirectoryToken}` },
+    headers: authHeaders(),
   });
 
   return data.thread_artifacts || [];

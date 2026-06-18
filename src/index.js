@@ -31,9 +31,9 @@ if (existsSync(lockFile)) {
 // Start admin UI (localhost only, access remotely via SSH tunnel)
 startAdminServer();
 
-// If no PAT configured, keep the admin server running for setup
-if (!config.pat) {
-  console.log('[bridge] No PAT configured — open http://localhost:3099 to set up');
+// If no token configured, keep the admin server running for setup
+if (!config.token) {
+  console.log('[bridge] No token configured — open http://localhost:3099 to set up');
   updateState({ status: 'setup', needsSetup: true });
 }
 
@@ -184,9 +184,9 @@ client.on('ready', async () => {
 
   try {
     const cache = await ensureTokens();
-    console.log(`[bridge] PromptQL connected: project=${cache.projectName}, room=${config.roomName}`);
+    console.log(`[bridge] PromptQL connected: endpoint=${config.projectEndpoint}, room=${config.roomName}`);
     console.log('[bridge] Ready! Send a message to get started.');
-    updateState({ status: 'ready', project: cache.projectName, room: config.roomName });
+    updateState({ status: 'ready', project: config.projectEndpoint, room: config.roomName });
     logActivity('status', 'Bridge ready');
   } catch (err) {
     console.error('[bridge] Failed to connect to PromptQL:', err.message);
@@ -392,8 +392,8 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-// Start — only initialize WhatsApp if PAT is configured
-if (config.pat) {
+// Start — only initialize WhatsApp if token is configured
+if (config.token) {
   client.initialize();
 } else {
   console.log('[bridge] Waiting for setup at http://localhost:3099 ...');

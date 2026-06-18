@@ -2,7 +2,7 @@ import { createServer } from 'http';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { listProjects, listRooms, ensureTokens } from './promptql-client.js';
+import { listRooms, ensureTokens } from './promptql-client.js';
 import { sessions } from './session-store.js';
 import { config } from './config.js';
 
@@ -65,6 +65,8 @@ function parseEnv() {
   return vars;
 }
 
+const persistedConfigPath = join(__dirname, '..', 'data', 'config.json');
+
 function saveEnv(updates) {
   const lines = existsSync(envPath) ? readFileSync(envPath, 'utf-8').split('\n') : [];
   const updated = new Set();
@@ -81,6 +83,16 @@ function saveEnv(updates) {
     if (!updated.has(key)) newLines.push(`${key}=${val}`);
   }
   writeFileSync(envPath, newLines.join('\n'));
+
+  // Also persist to data/config.json (survives Docker container recreation)
+  try {
+    let persisted = {};
+    if (existsSync(persistedConfigPath)) {
+      persisted = JSON.parse(readFileSync(persistedConfigPath, 'utf-8'));
+    }
+    Object.assign(persisted, updates);
+    writeFileSync(persistedConfigPath, JSON.stringify(persisted, null, 2));
+  } catch {}
 }
 
 async function handleRequest(req, res) {
@@ -89,24 +101,28 @@ async function handleRequest(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/state') {
     const env = parseEnv();
     const safeEnv = { ...env };
-    // Mask PAT but indicate if set
-    const hasPat = !!(safeEnv.PROMPTQL_PAT || safeEnv.PERSONAL_PAT);
-    delete safeEnv.PROMPTQL_PAT;
-    delete safeEnv.PERSONAL_PAT;
+    // Mask token but indicate if set
+    const hasToken = !!safeEnv.PROMPTQL_TOKEN;
+    delete safeEnv.PROMPTQL_TOKEN;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ...state, env: safeEnv, hasPat, stats, debug: config.debug, log: config.debug ? activityLog.slice(0, 50) : [] }));
+    res.end(JSON.stringify({ ...state, env: safeEnv, hasToken, stats, debug: config.debug, log: config.debug ? activityLog.slice(0, 50) : [] }));
     return;
   }
 
-  // Setup endpoint — save PAT and phone number, create .env if needed
+  // Setup endpoint — save token and phone number, create .env if needed
   if (req.method === 'POST' && url.pathname === '/api/setup') {
     let body = '';
     req.on('data', c => body += c);
     req.on('end', () => {
       try {
-        const { pat, myNumber } = JSON.parse(body);
-        if (!pat) { res.writeHead(400); res.end(JSON.stringify({ error: 'PAT is required' })); return; }
-        const updates = { PROMPTQL_PAT: pat };
+        const parsed = JSON.parse(body);
+        const token = parsed.token;
+        const endpoint = parsed.endpoint;
+        if (!token) { res.writeHead(400); res.end(JSON.stringify({ error: 'Token is required' })); return; }
+        if (!token.startsWith('pql_ut_')) { res.writeHead(400); res.end(JSON.stringify({ error: 'Token must be a PromptQL user token (pql_ut_...)' })); return; }
+        const myNumber = parsed.myNumber;
+        const updates = { PROMPTQL_TOKEN: token };
+        if (endpoint) updates.PROMPTQL_ENDPOINT = endpoint;
         if (myNumber) updates.MY_NUMBER = myNumber;
         // Create .env from example if it doesn't exist
         if (!existsSync(envPath)) {
@@ -126,18 +142,6 @@ async function handleRequest(req, res) {
         res.end(JSON.stringify({ error: err.message }));
       }
     });
-    return;
-  }
-
-  if (req.method === 'GET' && url.pathname === '/api/projects') {
-    try {
-      const projects = await listProjects();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(projects));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
     return;
   }
 
@@ -380,15 +384,9 @@ header .tag{margin-left:auto;font-size:11px;color:var(--dim);background:var(--su
 
 <div class="card config-card">
   <h2>PromptQL</h2>
-  <div class="row">
-    <div class="field">
-      <label>Project</label>
-      <select id="project"><option value="">Loading...</option></select>
-    </div>
-    <div class="field">
-      <label>Room</label>
-      <select id="room"><option value="">Loading...</option></select>
-    </div>
+  <div class="field">
+    <label>Room</label>
+    <select id="room"><option value="">Loading...</option></select>
   </div>
   <div class="field">
     <label>New thread after idle (minutes)</label>
@@ -416,7 +414,7 @@ header .tag{margin-left:auto;font-size:11px;color:var(--dim);background:var(--su
 <script>
 const $=id=>document.getElementById(id);
 let env={};let loaded=false;let dirty=false;
-let projectsCache=[];let roomsCache=[];
+let roomsCache=[];
 
 // Access control state (3 axes)
 let acl={listenDm:true,listenGroups:'',who:'me',allowedContacts:'',wakeWord:''};
@@ -469,20 +467,6 @@ function aclChange(){
   else if(!acl.wakeWord)acl.wakeWord='pql';
   renderAcl();
   markDirty();
-}
-
-async function loadProjects(){
-  try{
-    const res=await fetch('/api/projects');
-    if(!res.ok)throw new Error('failed');
-    projectsCache=await res.json();
-    const sel=$('project');
-    const cur=env.PROMPTQL_PROJECT||'';
-    sel.innerHTML='<option value="">(auto-detect first)</option>'+
-      projectsCache.map(p=>'<option value="'+p.name+'"'+(p.name===cur?' selected':'')+'>'+p.name+(p.title?' - '+p.title:'')+'</option>').join('');
-  }catch{
-    $('project').innerHTML='<option value="">(connect to load)</option>';
-  }
 }
 
 async function loadRooms(){
@@ -566,18 +550,19 @@ async function poll(){
     const data=await res.json();
     env=data.env||{};
 
-    // Setup mode — show setup form
+    // Setup mode — show setup form (skip re-render if already showing to preserve focus)
     if(data.needsSetup||data.status==='setup'){
+      if($('setup-token')){return;}
       $('hero').innerHTML='<div style="text-align:left;max-width:400px;margin:0 auto">'+
         '<h3 style="color:var(--brand);margin-bottom:12px">Welcome to PontQL</h3>'+
         '<p style="color:var(--dim);margin-bottom:16px;font-size:13px">Enter your PromptQL credentials to get started.</p>'+
-        '<label style="font-size:12px;color:var(--dim);display:block;margin-bottom:4px">PromptQL PAT <span style="color:#ef4444">*</span></label>'+
-        '<input id="setup-pat" type="password" placeholder="pat_..." style="width:100%;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:monospace;font-size:13px;margin-bottom:12px">'+
-        '<label style="font-size:12px;color:var(--dim);display:block;margin-bottom:4px">Phone number (with country code, no +)</label>'+
+        '<label style="font-size:12px;color:var(--dim);display:block;margin-bottom:4px">PromptQL Token <span style="color:#ef4444">*</span></label>'+
+        '<input id="setup-token" type="password" placeholder="pql_ut_..." style="width:100%;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:monospace;font-size:13px;margin-bottom:12px">'+
+                '<label style="font-size:12px;color:var(--dim);display:block;margin-bottom:4px">Phone number (with country code, no +)</label>'+
         '<input id="setup-number" type="text" placeholder="61412345678" style="width:100%;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;margin-bottom:16px">'+
         '<button onclick="doSetup()" style="width:100%;padding:10px;background:var(--brand);color:var(--brand-fg);border:none;border-radius:6px;font-weight:600;cursor:pointer;font-size:14px">Connect</button>'+
         '<p id="setup-err" style="color:#ef4444;font-size:12px;margin-top:8px"></p>'+
-        '<p style="color:var(--dim2);font-size:11px;margin-top:12px">Get a PAT at <a href="https://cloud.hasura.io/account-settings/access-tokens" target="_blank" style="color:var(--brand)">cloud.hasura.io</a></p>'+
+        '<p style="color:var(--dim2);font-size:11px;margin-top:12px">Get a token from Settings \\u2192 Access Tokens in the PromptQL console</p>'+
         '</div>';
       // Hide everything except the setup form
       $('status-card').style.display='none';
@@ -644,17 +629,14 @@ async function poll(){
       acl.wakeWord=env.WAKE_WORD||'';
       $('timeout').value=env.SESSION_TIMEOUT||'10';
       renderAcl();
-      $('project').addEventListener('change',markDirty);
       $('room').addEventListener('change',markDirty);
       $('timeout').addEventListener('input',markDirty);
-      loadProjects();
       loadRooms();
       loadGroups();
     }
 
     // Reload dropdowns when we become ready
-    if(data.status==='ready'&&projectsCache.length===0){
-      loadProjects();
+    if(data.status==='ready'&&roomsCache.length===0){
       loadRooms();
       loadGroups();
     }
@@ -662,22 +644,25 @@ async function poll(){
 }
 
 async function doSetup(){
-  const pat=$('setup-pat')?.value?.trim();
+  const token=$('setup-token')?.value?.trim();
+  const endpoint='';
   const num=$('setup-number')?.value?.trim();
-  if(!pat){$('setup-err').textContent='PAT is required';return;}
+  if(!token){$('setup-err').textContent='Token is required';return;}
+  if(!token.startsWith('pql_ut_')){$('setup-err').textContent='Token must start with pql_ut_';return;}
   try{
-    const res=await fetch('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pat,myNumber:num})});
+    const res=await fetch('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token,myNumber:num})});
     const data=await res.json();
     if(!res.ok){$('setup-err').textContent=data.error||'Failed';return;}
-    $('hero').innerHTML='<div class="pill wait">Connecting<span class="loading-dot" style="margin-left:4px"></span></div>';
+    $('hero').innerHTML='<div class="pill wait">Restarting<span class="loading-dot" style="margin-left:4px"></span></div>';
     loaded=false;
-    setTimeout(poll,3000);
+    // Server is restarting — keep polling until it comes back, then full reload
+    const waitForRestart=()=>{fetch('/api/state').then(r=>r.json()).then(()=>location.reload()).catch(()=>setTimeout(waitForRestart,2000));};
+    setTimeout(waitForRestart,3000);
   }catch(e){$('setup-err').textContent='Error: '+e.message;}
 }
 
 async function save(){
   const updates={
-    PROMPTQL_PROJECT:$('project').value,
     PROMPTQL_ROOM:$('room').value,
     SESSION_TIMEOUT:$('timeout').value,
     LISTEN_DM:acl.listenDm?'true':'false',
@@ -690,23 +675,25 @@ async function save(){
   try{
     await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(updates)});
     const t=$('toast');t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);
-    dirty=false;$('save-btn').classList.remove('show');loaded=false;projectsCache=[];
-  }catch{}
+    dirty=false;$('save-btn').classList.remove('show');loaded=false;  }catch{}
   $('save-btn').textContent='Save & Restart';
-  setTimeout(poll,3000);
+  const wr1=()=>{fetch('/api/state').then(r=>r.json()).then(()=>location.reload()).catch(()=>setTimeout(wr1,2000));};
+  setTimeout(wr1,3000);
 }
 
 async function restart(){
   try{await fetch('/api/restart',{method:'POST'});}catch{}
   $('hero').innerHTML='<div class="pill wait">Restarting<span class="loading-dot" style="margin-left:4px"></span></div>';
-  loaded=false;projectsCache=[];
-  setTimeout(poll,3000);
+  loaded=false;
+  const wr2=()=>{fetch('/api/state').then(r=>r.json()).then(()=>location.reload()).catch(()=>setTimeout(wr2,2000));};
+  setTimeout(wr2,3000);
 }
 async function reset(){
   try{await fetch('/api/reset',{method:'POST'});}catch{}
   $('hero').innerHTML='<div class="pill wait">Resetting<span class="loading-dot" style="margin-left:4px"></span></div>';
-  loaded=false;projectsCache=[];
-  setTimeout(poll,3000);
+  loaded=false;
+  const wr3=()=>{fetch('/api/state').then(r=>r.json()).then(()=>location.reload()).catch(()=>setTimeout(wr3,2000));};
+  setTimeout(wr3,3000);
 }
 
 poll();

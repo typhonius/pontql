@@ -12,7 +12,7 @@ PontQL bridges WhatsApp messages to the PromptQL API. It renders artifacts (tabl
 
 ```bash
 cp .env.example .env
-# Edit .env — add your PROMPTQL_PAT and MY_NUMBER
+# Edit .env — add your PROMPTQL_TOKEN, PROMPTQL_ENDPOINT, and MY_NUMBER
 
 docker compose up -d
 
@@ -25,7 +25,7 @@ docker compose up -d
 npm install
 
 cp .env.example .env
-# Edit .env — add your PROMPTQL_PAT and MY_NUMBER
+# Edit .env — add your PROMPTQL_TOKEN, PROMPTQL_ENDPOINT, and MY_NUMBER
 
 npm start
 
@@ -61,15 +61,16 @@ After starting, scan the QR code with WhatsApp (Settings > Linked Devices > Link
 - Chrome or Chromium (auto-detected, or set `CHROME_PATH`)
 
 **Both need:**
-- A [PromptQL PAT](https://cloud.hasura.io/account-settings/access-tokens)
+- A PromptQL user token (`pql_ut_...`)
 
 ## Configuration
 
-Only two values are required in `.env`:
+Three values are required in `.env`:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `PROMPTQL_PAT` | Yes | Your Hasura Cloud Personal Access Token |
+| `PROMPTQL_TOKEN` | Yes | Your PromptQL user token (`pql_ut_...`) |
+| `PROMPTQL_ENDPOINT` | Yes | Your project endpoint (e.g. `https://data.prompt.ql.app/my-project`) |
 | `MY_NUMBER` | Yes | Your phone number (country code, no +) |
 
 Everything else has sensible defaults and can be changed from the admin dashboard at `http://localhost:3099`.
@@ -101,7 +102,7 @@ Three independent axes — combine freely:
 | `/resume <n>` | Resume thread #n |
 | `/rooms` | List available PromptQL rooms |
 | `/room <name>` | Switch to a room |
-| `/project <name>` | Switch PromptQL project |
+| `/project` | Show project endpoint |
 | `/teach <text>` | Submit knowledge to the wiki |
 | `/status` | Show current bridge state |
 | `/help` | Show all commands |

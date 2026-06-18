@@ -6,13 +6,12 @@ import {
   listRooms,
   switchRoom,
   listThreads,
-  switchProject,
-  listProjects,
   submitTeaching,
   getCache,
   createEmptyThread,
   uploadArtifact,
 } from './promptql-client.js';
+import { config } from './config.js';
 import { sessions } from './session-store.js';
 import { parseEvent } from './event-parser.js';
 import { artifactToWhatsApp, setCurrentThread } from './artifact-handler.js';
@@ -224,41 +223,12 @@ async function handleCommand(chatId, text, reply, sendMedia) {
     }
 
     case '/project': {
-      if (!args) {
-        const cache = getCache();
-        await reply(`Current project: *${cache.projectName || 'none'}*\nUsage: /project <name>`);
-        return;
-      }
-      try {
-        const result = await switchProject(args);
-        if (!result) {
-          const projects = await listProjects();
-          const names = projects.map(p => `• ${p.name}`).join('\n');
-          await reply(`Project "${args}" not found.\n\n*Available projects:*\n${names}`);
-          return;
-        }
-        sessions.clearThread(chatId);
-        await reply(`Switched to project *${result.name}*`);
-      } catch (err) {
-        await reply('Failed to switch project: ' + err.message);
-      }
+      await reply(`Project is configured via PROMPTQL_ENDPOINT in the dashboard.`);
       break;
     }
 
     case '/projects': {
-      try {
-        const projects = await listProjects();
-        const cache = getCache();
-        let msg = '*Projects:*\n\n';
-        projects.forEach(p => {
-          const current = p.name === cache.projectName ? ' (current)' : '';
-          msg += `• *${p.name}*${p.title ? ` - ${p.title}` : ''}${current}\n`;
-        });
-        msg += '\nUse /project <name> to switch.';
-        await reply(msg);
-      } catch (err) {
-        await reply('Failed to list projects: ' + err.message);
-      }
+      await reply(`Project is configured via PROMPTQL_ENDPOINT in the dashboard.`);
       break;
     }
 
@@ -266,7 +236,7 @@ async function handleCommand(chatId, text, reply, sendMedia) {
       const session = sessions.get(chatId);
       const cache = getCache();
       let msg = '*Bridge Status*\n\n';
-      msg += `Project: *${cache.projectName || 'none'}*\n`;
+      msg += `Endpoint: *${config.projectEndpoint || 'none'}*\n`;
       msg += `Room: *${session?.room_name || cache.roomName || 'default'}*\n`;
       msg += `Active thread: ${session?.thread_id ? `*${session.thread_title || 'untitled'}*` : '_none_'}\n`;
       await reply(msg);
