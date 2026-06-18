@@ -1,6 +1,6 @@
 # PontQL
 
-Talk to your [PromptQL](https://hasura.io/promptql) AI assistant from WhatsApp.
+Talk to [PromptQL](https://promptql.io) from WhatsApp — multiplayer AI with shared context.
 
 PontQL bridges WhatsApp messages to the PromptQL API. It renders artifacts (tables, charts, dashboards) as images, streams live status updates, and manages conversation threads per chat.
 
