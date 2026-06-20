@@ -69,6 +69,18 @@ export const config = {
  *
  * Returns { allowed, strippedBody?, needsGroupCheck? }
  */
+/**
+ * Check if a given sender number is an allowed user (WHO axis only).
+ * Used by vote handlers and other non-message actions.
+ */
+export function isAllowedUser(senderNumber, fromMe = false) {
+  const { who, myNumber, allowedContacts } = config;
+  const isSelf = (myNumber && senderNumber.includes(myNumber)) || fromMe;
+  if (who === 'me') return isSelf;
+  if (who === 'contacts') return isSelf || allowedContacts.some(n => senderNumber.includes(n));
+  return true; // 'anyone'
+}
+
 export function shouldProcess(msg, subscribedGroupIds = null) {
   const { listenDm, listenGroups, who, myNumber, allowedContacts, wakeWord } = config;
   const isGroup = msg.from.endsWith('@g.us');

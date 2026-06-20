@@ -5,7 +5,7 @@ import pkg from 'whatsapp-web.js';
 const { Client, LocalAuth, MessageMedia } = pkg;
 import qrTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
-import { config, shouldProcess } from './config.js';
+import { config, shouldProcess, isAllowedUser } from './config.js';
 import { ensureTokens, submitTeaching } from './promptql-client.js';
 import { handleMessage, pendingLearnings } from './message-handler.js';
 import { sessions } from './session-store.js';
@@ -329,6 +329,13 @@ client.on('vote_update', async (vote) => {
 
     const pending = pendingLearnings.get(pollId);
     if (!pending) return;
+
+    // Check voter is an allowed user (same WHO rules as messages)
+    const voterNumber = (vote.voter || '').replace('@c.us', '');
+    if (!isAllowedUser(voterNumber)) {
+      logActivity('learning', `Vote ignored: ${voterNumber} not allowed`);
+      return; // Don't delete pending — wait for an authorized vote
+    }
 
     pendingLearnings.delete(pollId);
 
