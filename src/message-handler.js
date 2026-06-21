@@ -22,6 +22,9 @@ const { Poll } = pkg;
 // Track active SSE streams so we don't double-subscribe
 const activeStreams = new Map(); // threadId → abort function
 
+// Serialize messages per chat to prevent concurrent poll loops on the same thread
+const chatQueues = new Map(); // chatId → Promise chain
+
 // Pending learning approvals: pollMsgSerializedId → { chatId, text, threadId, agentMessageId }
 export const pendingLearnings = new Map();
 
@@ -43,6 +46,14 @@ export async function handleMessage(chatId, body, reply, sendMedia, replySave, m
     return handleCommand(chatId, text, reply, sendMedia);
   }
 
+  // Serialize messages per chat — prevents concurrent poll loops on the same thread
+  const prev = chatQueues.get(chatId) || Promise.resolve();
+  const current = prev.then(() => _handleMessage(chatId, text, reply, sendMedia, replySave, media)).catch(() => {});
+  chatQueues.set(chatId, current);
+  return current;
+}
+
+async function _handleMessage(chatId, text, reply, sendMedia, replySave, media) {
   // Regular message → send to PromptQL
   try {
     const session = sessions.get(chatId);
@@ -300,6 +311,7 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
     let pollCount = 0;
     const maxPolls = 150; // ~3 minutes max
     let lastEventId = storedEventId;
+    logActivity('poll', `starting poll from event#${lastEventId} for thread ${threadId.slice(0, 8)}`);
 
     const editStatus = async (text) => {
       if (text === lastStatus) return;
@@ -325,6 +337,9 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
           sessions.setLastEventId(chatId, lastEventId);
 
           const parsed = parseEvent(event);
+          if (parsed.length > 0) {
+            logActivity('events', `event#${lastEventId}: ${parsed.map(p => p.type + (p.type === 'text' ? `[${p.text?.slice(0,40)}]` : '')).join(', ')}`);
+          }
           for (const item of parsed) {
             switch (item.type) {
               case 'text':
@@ -405,6 +420,7 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
 
               case 'done':
                 isDone = true;
+                logActivity('done', `sentTexts=${sentTexts.size}, summary=${item.summary ? 'yes' : 'no'}, polls=${pollCount}`);
                 if (item.summary && sentTexts.size === 0) {
                   await reply(item.summary);
                 }
