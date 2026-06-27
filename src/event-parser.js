@@ -45,6 +45,10 @@ export function parseEvent(event) {
   // interaction_finished — the ONLY true done signal
   if (content.interaction_finished) {
     const outcome = content.interaction_finished.outcome;
+    if (outcome?.errored) {
+      const errMsg = outcome.errored.user_facing_message || outcome.errored.raw_error || 'Unknown error';
+      results.push({ type: 'error', message: errMsg });
+    }
     const summary = outcome?.completed?.summary;
     results.push({ type: 'done', summary: summary || null });
     return results;

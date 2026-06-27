@@ -82,6 +82,10 @@ const client = new Client({
 // Track message IDs we've sent so we don't process our own bot replies
 const sentByBot = new Set();
 
+// Track when the client became ready — skip messages received before this
+let readyAt = 0;
+const STALE_MESSAGE_THRESHOLD = 30; // seconds — skip messages older than this at startup
+
 // --- Resilience: restart on fatal errors ---
 function triggerRestart(reason) {
   console.error(`[bridge] RESTARTING: ${reason}`);
@@ -94,14 +98,23 @@ function triggerRestart(reason) {
 
 // Heartbeat — proactively detect zombie state every 2 minutes
 let heartbeatInterval = null;
+let unhealthyCount = 0;
+const MAX_UNHEALTHY = 2; // Restart after 2 consecutive unhealthy heartbeats (~4 min)
 function startHeartbeat() {
   if (heartbeatInterval) clearInterval(heartbeatInterval);
+  unhealthyCount = 0;
   heartbeatInterval = setInterval(async () => {
     try {
       const state = await client.getState();
       if (state !== 'CONNECTED') {
-        console.error('[heartbeat] Client state:', state);
+        unhealthyCount++;
+        console.error(`[heartbeat] Client state: ${state} (${unhealthyCount}/${MAX_UNHEALTHY})`);
         updateState({ status: 'unhealthy: ' + state });
+        if (unhealthyCount >= MAX_UNHEALTHY) {
+          triggerRestart(`Stuck in ${state} state for ${unhealthyCount} heartbeats`);
+        }
+      } else {
+        unhealthyCount = 0;
       }
     } catch (err) {
       console.error('[heartbeat] Health check failed:', err?.message);
@@ -151,6 +164,7 @@ client.on('auth_failure', (msg) => {
 
 client.on('ready', async () => {
   console.log('[bridge] WhatsApp client ready');
+  readyAt = Date.now();
   if (readyTimeout) { clearTimeout(readyTimeout); readyTimeout = null; }
   const info = client.info;
   updateState({ status: 'connecting to PromptQL', phone: info?.wid?.user || config.myNumber });
@@ -246,6 +260,15 @@ async function processMessage(msg, source) {
     // Allow messages with media even if body is empty (use caption or default description)
     const hasMedia = msg.hasMedia;
     if (!msg.body && !hasMedia) return;
+
+    // Skip stale messages from before this process was ready (prevents backlog flood on restart)
+    if (readyAt && msg.timestamp) {
+      const msgAge = (readyAt / 1000) - msg.timestamp;
+      if (msgAge > STALE_MESSAGE_THRESHOLD) {
+        console.log(`[${source}] Skipping stale message (${Math.round(msgAge)}s old): ${(msg.body || '').slice(0, 40)}`);
+        return;
+      }
+    }
 
     // Skip messages we sent as bot replies
     if (msg.id?._serialized && sentByBot.has(msg.id._serialized)) {

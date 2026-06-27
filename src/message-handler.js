@@ -22,8 +22,8 @@ const { Poll } = pkg;
 // Track active SSE streams so we don't double-subscribe
 const activeStreams = new Map(); // threadId → abort function
 
-// Serialize messages per chat to prevent concurrent poll loops on the same thread
-const chatQueues = new Map(); // chatId → Promise chain
+// Track active poll loops per chat so new messages can cancel and restart them
+const activePolls = new Map(); // chatId → { abort: () => void }
 
 // Pending learning approvals: pollMsgSerializedId → { chatId, text, threadId, agentMessageId }
 export const pendingLearnings = new Map();
@@ -46,11 +46,15 @@ export async function handleMessage(chatId, body, reply, sendMedia, replySave, m
     return handleCommand(chatId, text, reply, sendMedia);
   }
 
-  // Serialize messages per chat — prevents concurrent poll loops on the same thread
-  const prev = chatQueues.get(chatId) || Promise.resolve();
-  const current = prev.then(() => _handleMessage(chatId, text, reply, sendMedia, replySave, media)).catch(() => {});
-  chatQueues.set(chatId, current);
-  return current;
+  // Cancel any active poll for this chat and wait for it to stop
+  if (activePolls.has(chatId)) {
+    const existing = activePolls.get(chatId);
+    existing.abort();
+    await existing.done;
+  }
+
+  // Send immediately — no queuing
+  return _handleMessage(chatId, text, reply, sendMedia, replySave, media);
 }
 
 async function _handleMessage(chatId, text, reply, sendMedia, replySave, media) {
@@ -79,8 +83,9 @@ async function _handleMessage(chatId, text, reply, sendMedia, replySave, media) 
       }
 
       const result = await sendMessage(threadId, text, uploads);
-      logActivity('api', `send_thread_message → ${threadId.slice(0, 8)}`);
-      await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
+      const pollAfter = result?.thread_event_id ? String(result.thread_event_id) : null;
+      logActivity('api', `send_thread_message → ${threadId.slice(0, 8)} (event#${pollAfter || '?'})`);
+      await waitForResponseCancellable(chatId, threadId, reply, sendMedia, replySave, statusMsg, pollAfter);
     } else {
       trackStat('messagesSent');
       trackStat('threadsCreated');
@@ -104,16 +109,20 @@ async function _handleMessage(chatId, text, reply, sendMedia, replySave, media) 
         }
 
         const result = await sendMessage(threadId, text, uploads);
-        logActivity('api', `send_thread_message → ${threadId.slice(0, 8)}`);
+        const pollAfter = result?.thread_event_id ? String(result.thread_event_id) : null;
+        logActivity('api', `send_thread_message → ${threadId.slice(0, 8)} (event#${pollAfter || '?'})`);
         sessions.setThread(chatId, threadId, emptyThread.title);
-        await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
+        await waitForResponseCancellable(chatId, threadId, reply, sendMedia, replySave, statusMsg, pollAfter);
       } else {
         // New thread without media: use start_thread directly
         const result = await startThread(text);
         threadId = result.thread_id;
-        logActivity('api', `start_thread → ${threadId.slice(0, 8)} "${result.title || ''}"`);
+        // Use the last event from start_thread as poll starting point
+        const lastEvt = result.thread_events?.slice(-1)[0];
+        const pollAfter = lastEvt?.thread_event_id ? String(lastEvt.thread_event_id) : null;
+        logActivity('api', `start_thread → ${threadId.slice(0, 8)} "${result.title || ''}" (event#${pollAfter || '?'})`);
         sessions.setThread(chatId, threadId, result.title);
-        await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg);
+        await waitForResponseCancellable(chatId, threadId, reply, sendMedia, replySave, statusMsg, pollAfter);
       }
     }
   } catch (err) {
@@ -288,7 +297,29 @@ async function handleCommand(chatId, text, reply, sendMedia) {
  *
  * @param {object} statusMsg - The initial "_thinking..._" or "_starting new thread..._" message object
  */
-async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg) {
+/**
+ * Wrapper that registers a cancellable poll loop. If a new message arrives for
+ * the same chat, handleMessage cancels this poll and starts a fresh one after
+ * sending the new message — so messages are never queued behind a slow response.
+ */
+async function waitForResponseCancellable(chatId, threadId, reply, sendMedia, replySave, statusMsg, pollAfter) {
+  let cancelled = false;
+  let resolveDone;
+  const donePromise = new Promise(r => { resolveDone = r; });
+  const handle = { abort: () => { cancelled = true; }, done: donePromise };
+  activePolls.set(chatId, handle);
+  try {
+    await waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg, () => cancelled, pollAfter);
+  } finally {
+    resolveDone();
+    // Only clean up if we're still the active poll (not replaced by a newer message)
+    if (activePolls.get(chatId) === handle) {
+      activePolls.delete(chatId);
+    }
+  }
+}
+
+async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, statusMsg, isCancelled, pollAfter) {
   // Track thread for artifact handler
   setCurrentThread(threadId);
 
@@ -303,15 +334,18 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
   let lastStatus = '';
   const sentTexts = new Set(); // Deduplicate
 
-  // Resume from where we left off to avoid re-sending old messages
+  // Use the event ID from the API response (pollAfter) if available — this skips any
+  // stale events from previous interactions that weren't delivered (e.g. after a crash).
+  // Fall back to stored last_event_id for backwards compatibility.
   const session = sessions.get(chatId);
   const storedEventId = session?.last_event_id || '0';
+  const startEventId = pollAfter || storedEventId;
 
   return new Promise((resolve) => {
     let pollCount = 0;
     const maxPolls = 150; // ~3 minutes max
-    let lastEventId = storedEventId;
-    logActivity('poll', `starting poll from event#${lastEventId} for thread ${threadId.slice(0, 8)}`);
+    let lastEventId = startEventId;
+    logActivity('poll', `starting poll from event#${lastEventId} for thread ${threadId.slice(0, 8)}${pollAfter ? ' (anchored to user msg)' : ' (stored)'}`);
 
     const editStatus = async (text) => {
       if (text === lastStatus) return;
@@ -326,6 +360,13 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
     };
 
     const poll = async () => {
+      // Check if this poll was cancelled (new message arrived for same chat)
+      if (isCancelled?.()) {
+        logActivity('poll', `cancelled after ${pollCount} polls (new message arrived)`);
+        resolve();
+        return;
+      }
+
       try {
         const events = await pollThreadEvents(threadId, lastEventId);
         if (events.length > 0) {
@@ -416,6 +457,12 @@ async function waitForResponse(chatId, threadId, reply, sendMedia, replySave, st
 
               case 'status':
                 await editStatus(item.status + '...');
+                break;
+
+              case 'error':
+                logActivity('error', `PQL error: ${item.message}`);
+                await editStatus('...');
+                await reply(`⚠️ *PromptQL error:* ${item.message}`);
                 break;
 
               case 'done':
